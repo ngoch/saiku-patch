@@ -1,0 +1,1683 @@
+From 3d1a11d0b87cae5ab17c8090b78120d657cbecb9 Mon Sep 17 00:00:00 2001
+From: Nikoloz Gochiashvili <nick@fina2.net>
+Date: Fri, 26 Feb 2016 16:04:09 +0400
+Subject: [PATCH] SKU-1028 # BUG: Sub-totals & Grand totals doesn't appear in
+ downloaded excel report. FIX: Add ExcelWorksheetBuilder  sub total and grand
+ total implementation
+
+---
+ .../org/saiku/service/olap/ThinQueryService.java   |  103 +-
+ .../saiku/service/util/export/ExcelExporter.java   |   32 +-
+ .../util/export/excel/ExcelWorksheetBuilder.java   | 1222 +++++++++++---------
+ 3 files changed, 784 insertions(+), 573 deletions(-)
+
+diff --git a/saiku-core/saiku-service/src/main/java/org/saiku/service/olap/ThinQueryService.java b/saiku-core/saiku-service/src/main/java/org/saiku/service/olap/ThinQueryService.java
+index 77a5a85..5104665 100644
+--- a/saiku-core/saiku-service/src/main/java/org/saiku/service/olap/ThinQueryService.java
++++ b/saiku-core/saiku-service/src/main/java/org/saiku/service/olap/ThinQueryService.java
+@@ -124,7 +124,6 @@ public class ThinQueryService implements Serializable {
+     }
+ 
+ 
+-
+     public ThinQuery createQuery(ThinQuery tq) {
+         if (StringUtils.isBlank(tq.getName())) {
+             tq.setName(UUID.randomUUID().toString());
+@@ -161,7 +160,6 @@ public class ThinQueryService implements Serializable {
+     }
+ 
+ 
+-
+     CellSet executeInternalQuery(ThinQuery query) throws Exception {
+         String runId = "RUN#:" + ID_GENERATOR.getAndIncrement();
+         QueryContext queryContext = context.get(query.getName());
+@@ -224,7 +222,7 @@ public class ThinQueryService implements Serializable {
+         CellSet cs = qc.getOlapResult();
+         String formatterName = (StringUtils.isBlank(format) ? "" : format.toLowerCase());
+         ICellSetFormatter cf = cff.forName(formatterName);
+-        CellDataSet result = OlapResultSetUtil.cellSet2Matrix(cs,cf);
++        CellDataSet result = OlapResultSetUtil.cellSet2Matrix(cs, cf);
+ 
+         if (ThinQuery.Type.QUERYMODEL.equals(tq.getType()) && cf instanceof FlattenedCellSetFormatter && tq.hasAggregators()) {
+             calculateTotals(tq, result, cs, cf);
+@@ -237,12 +235,12 @@ public class ThinQueryService implements Serializable {
+ 
+             Long start = (new Date()).getTime();
+             log.debug("Query Start");
+-            CellSet cellSet =  executeInternalQuery(tq);
++            CellSet cellSet = executeInternalQuery(tq);
+             log.debug("Query End");
+             String runId = "RUN#:" + ID_GENERATOR.get();
+             Long exec = (new Date()).getTime();
+ 
+-            CellDataSet result = OlapResultSetUtil.cellSet2Matrix(cellSet,formatter);
++            CellDataSet result = OlapResultSetUtil.cellSet2Matrix(cellSet, formatter);
+             Long format = (new Date()).getTime();
+ 
+             if (ThinQuery.Type.QUERYMODEL.equals(tq.getType()) && formatter instanceof FlattenedCellSetFormatter && tq.hasAggregators()) {
+@@ -255,7 +253,7 @@ public class ThinQueryService implements Serializable {
+             result.setRuntime(new Double(format - start).intValue());
+             return result;
+         } catch (Exception | Error e) {
+-            throw new SaikuServiceException("Can't execute query: " + tq.getName(),e);
++            throw new SaikuServiceException("Can't execute query: " + tq.getName(), e);
+         }
+     }
+ 
+@@ -274,18 +272,18 @@ public class ThinQueryService implements Serializable {
+         }
+     }
+ 
+-    private void getEnabledCMembers(ThinQueryModel qm, ThinQueryModel queryModel){
++    private void getEnabledCMembers(ThinQueryModel qm, ThinQueryModel queryModel) {
+         int i = 0;
+-        for (Map.Entry<AxisLocation, ThinAxis> entry : qm.getAxes().entrySet()){
++        for (Map.Entry<AxisLocation, ThinAxis> entry : qm.getAxes().entrySet()) {
+             ThinAxis v = entry.getValue();
+-            for(ThinHierarchy h :v.getHierarchies()){
+-                for(Map.Entry<String, ThinLevel> entry1 :h.getLevels().entrySet()){
++            for (ThinHierarchy h : v.getHierarchies()) {
++                for (Map.Entry<String, ThinLevel> entry1 : h.getLevels().entrySet()) {
+                     ThinLevel v2 = entry1.getValue();
+-                    if(v2.getSelection()!= null) {
++                    if (v2.getSelection() != null) {
+                         for (ThinMember m : v2.getSelection().getMembers()) {
+-                            if (m.getType()!=null && m.getType().equals("calculatedmember")) {
++                            if (m.getType() != null && m.getType().equals("calculatedmember")) {
+                                 queryModel.getAxes().get(entry.getKey()).getHierarchies().get(i).getLevels().get(entry1
+-                                    .getKey()).getSelection().getMembers().add(m);
++                                        .getKey()).getSelection().getMembers().add(m);
+                             }
+                         }
+                     }
+@@ -294,6 +292,7 @@ public class ThinQueryService implements Serializable {
+             }
+         }
+     }
++
+     public ThinQuery updateQuery(ThinQuery old) throws Exception {
+         if (ThinQuery.Type.QUERYMODEL.equals(old.getType())) {
+             Cube cub = olapDiscoverService.getNativeCube(old.getCube());
+@@ -331,7 +330,7 @@ public class ThinQueryService implements Serializable {
+     }
+ 
+     public byte[] getExport(String queryName, String type) {
+-        return getExport(queryName,type,new FlattenedCellSetFormatter());
++        return getExport(queryName, type, new FlattenedCellSetFormatter());
+     }
+ 
+     public byte[] getExport(String queryName, String type, String formatter) {
+@@ -342,14 +341,34 @@ public class ThinQueryService implements Serializable {
+ 
+     private byte[] getExport(String queryName, String type, ICellSetFormatter formatter) {
+         if (StringUtils.isNotBlank(type) && context.containsKey(queryName)) {
+-            CellSet rs = context.get(queryName).getOlapResult();
+-            ThinQuery tq = context.get(queryName).getOlapQuery();
++            //Query Context
++            QueryContext qc = context.get(queryName);
++
++            //Query
++            ThinQuery tq = qc.getOlapQuery();
++
++            //Query exec result
++            CellSet rs = qc.getOlapResult();
++
++            //Query result as table
++            CellDataSet table = OlapResultSetUtil.cellSet2Matrix(rs, formatter);
++
++            //Calculate totals and sub totals
++            if (ThinQuery.Type.QUERYMODEL.equals(tq.getType()) && formatter instanceof FlattenedCellSetFormatter && tq.hasAggregators()) {
++                try {
++                    calculateTotals(tq, table, rs, formatter);
++                } catch (Exception e) {
++                    //Ignore totals calculation errors
++                    log.error(e.getMessage(), e);
++                }
++            }
++
+             List<ThinHierarchy> filterHierarchies = null;
+             if (ThinQuery.Type.QUERYMODEL.equals(tq.getType())) {
+                 filterHierarchies = tq.getQueryModel().getAxes().get(AxisLocation.FILTER).getHierarchies();
+             }
+             if (type.toLowerCase().equals("xls")) {
+-                return ExcelExporter.exportExcel(rs, formatter, filterHierarchies);
++                return ExcelExporter.exportExcel(table, formatter, filterHierarchies);
+             }
+             if (type.toLowerCase().equals("csv")) {
+                 return CsvExporter.exportCsv(rs, SaikuProperties.webExportCsvDelimiter, SaikuProperties.webExportCsvTextEscape, formatter);
+@@ -368,8 +387,7 @@ public class ThinQueryService implements Serializable {
+             String mdx = query.getMdx();
+             if (maxrows > 0) {
+                 mdx = "DRILLTHROUGH MAXROWS " + maxrows + " " + mdx;
+-            }
+-            else {
++            } else {
+                 mdx = "DRILLTHROUGH " + mdx;
+             }
+             if (StringUtils.isNotBlank(returns)) {
+@@ -377,11 +395,12 @@ public class ThinQueryService implements Serializable {
+             }
+             return stmt.executeQuery(mdx);
+         } catch (SQLException e) {
+-            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName,e);
++            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName, e);
+         } finally {
+             try {
+-                if (stmt != null)  stmt.close();
+-            } catch (Exception e) {}
++                if (stmt != null) stmt.close();
++            } catch (Exception e) {
++            }
+         }
+     }
+ 
+@@ -393,7 +412,7 @@ public class ThinQueryService implements Serializable {
+                 return SaikuMondrianHelper.isMondrianDrillthrough(con, query.getMdx());
+             }
+         } catch (Exception | Error e) {
+-            log.warn("Error checking for DRILLTHROUGH: " + query.getName() + " DRILLTHROUGH MDX:" + query.getMdx(),e);
++            log.warn("Error checking for DRILLTHROUGH: " + query.getName() + " DRILLTHROUGH MDX:" + query.getMdx(), e);
+         }
+         return false;
+ 
+@@ -407,11 +426,12 @@ public class ThinQueryService implements Serializable {
+             stmt = con.createStatement();
+             return stmt.executeQuery(query.getMdx());
+         } catch (SQLException e) {
+-            throw new SaikuServiceException("Error DRILLTHROUGH: " + query.getMdx() + " DRILLTHROUGH MDX:" + query.getMdx(),e);
++            throw new SaikuServiceException("Error DRILLTHROUGH: " + query.getMdx() + " DRILLTHROUGH MDX:" + query.getMdx(), e);
+         } finally {
+             try {
+-                if (stmt != null)  stmt.close();
+-            } catch (Exception e) {}
++                if (stmt != null) stmt.close();
++            } catch (Exception e) {
++            }
+         }
+ 
+     }
+@@ -460,8 +480,7 @@ public class ThinQueryService implements Serializable {
+             select = buf.toString();
+             if (maxrows > 0) {
+                 select = "DRILLTHROUGH MAXROWS " + maxrows + " " + select + "\r\n";
+-            }
+-            else {
++            } else {
+                 select = "DRILLTHROUGH " + select + "\r\n";
+             }
+             if (StringUtils.isNotBlank(returns)) {
+@@ -470,16 +489,16 @@ public class ThinQueryService implements Serializable {
+             log.debug("Drill Through for query (" + queryName + ") : \r\n" + select);
+             return stmt.executeQuery(select);
+         } catch (Exception e) {
+-            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName,e);
++            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName, e);
+         } finally {
+             try {
+                 if (stmt != null) stmt.close();
+-            } catch (Exception e) {}
++            } catch (Exception e) {
++            }
+         }
+     }
+ 
+ 
+-
+     public byte[] exportDrillthroughCsv(String queryName, int maxrows) {
+         OlapStatement stmt = null;
+         try {
+@@ -490,19 +509,19 @@ public class ThinQueryService implements Serializable {
+             String mdx = query.getMdx();
+             if (maxrows > 0) {
+                 mdx = "DRILLTHROUGH MAXROWS " + maxrows + " " + mdx;
+-            }
+-            else {
++            } else {
+                 mdx = "DRILLTHROUGH " + mdx;
+             }
+ 
+             ResultSet rs = stmt.executeQuery(mdx);
+             return CsvExporter.exportCsv(rs);
+         } catch (SQLException e) {
+-            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName,e);
++            throw new SaikuServiceException("Error DRILLTHROUGH: " + queryName, e);
+         } finally {
+             try {
+-                if (stmt != null)  stmt.close();
+-            } catch (Exception e) {}
++                if (stmt != null) stmt.close();
++            } catch (Exception e) {
++            }
+         }
+ 
+     }
+@@ -511,12 +530,11 @@ public class ThinQueryService implements Serializable {
+         return CsvExporter.exportCsv(rs);
+     }
+ 
+-    public byte[] exportResultSetCsv(ResultSet rs, String delimiter, String enclosing, boolean printHeader, List<KeyValue<String,String>> additionalColumns) {
++    public byte[] exportResultSetCsv(ResultSet rs, String delimiter, String enclosing, boolean printHeader, List<KeyValue<String, String>> additionalColumns) {
+         return CsvExporter.exportCsv(rs, delimiter, enclosing, printHeader, additionalColumns);
+     }
+ 
+ 
+-
+     public List<SimpleCubeElement> getResultMetadataMembers(
+             String queryName,
+             boolean preferResult,
+@@ -537,7 +555,7 @@ public class ThinQueryService implements Serializable {
+                 for (CellSetAxis axis : cs.getAxes()) {
+                     int posIndex = 0;
+                     for (Hierarchy h : axis.getAxisMetaData().getHierarchies()) {
+-                        if (h!=null && (h.getUniqueName().equals(hierarchyName) || h.getName().equals(hierarchyName))) {
++                        if (h != null && (h.getUniqueName().equals(hierarchyName) || h.getName().equals(hierarchyName))) {
+                             log.debug("Found hierarchy in the result: " + hierarchyName);
+                             if (h.getLevels().size() == 1) {
+                                 break;
+@@ -644,8 +662,7 @@ public class ThinQueryService implements Serializable {
+                 }
+ 
+ 
+-
+-                for(Hierarchy h : memberSelection.keySet()) {
++                for (Hierarchy h : memberSelection.keySet()) {
+                     QueryHierarchy qh = q.getHierarchy(h);
+                     for (QueryLevel ql : qh.getActiveQueryLevels()) {
+                         ql.getInclusions().clear();
+@@ -664,12 +681,12 @@ public class ThinQueryService implements Serializable {
+             }
+ 
+         } catch (Exception e) {
+-            throw new SaikuServiceException("Error zoom in on query: " + queryName,e);
++            throw new SaikuServiceException("Error zoom in on query: " + queryName, e);
+         }
+ 
+     }
+ 
+-    public ThinQuery drillacross(String queryName, List<Integer> cellPosition,Map<String, List<String>> levels) {
++    public ThinQuery drillacross(String queryName, List<Integer> cellPosition, Map<String, List<String>> levels) {
+         try {
+             ThinQuery old = context.get(queryName).getOlapQuery();
+             Cube cub = olapDiscoverService.getNativeCube(old.getCube());
+diff --git a/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/ExcelExporter.java b/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/ExcelExporter.java
+index 9d740a8..a1aa771 100644
+--- a/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/ExcelExporter.java
++++ b/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/ExcelExporter.java
+@@ -15,8 +15,6 @@
+  */
+ package org.saiku.service.util.export;
+ 
+-import java.util.List;
+-
+ import org.olap4j.CellSet;
+ import org.saiku.olap.dto.resultset.CellDataSet;
+ import org.saiku.olap.query2.ThinHierarchy;
+@@ -27,25 +25,33 @@ import org.saiku.olap.util.formatter.ICellSetFormatter;
+ import org.saiku.service.util.export.excel.ExcelBuilderOptions;
+ import org.saiku.service.util.export.excel.ExcelWorksheetBuilder;
+ 
++import java.util.List;
++
+ public class ExcelExporter {
+ 
+-	public static byte[] exportExcel(CellSet cellSet, List<ThinHierarchy> filters) {
+-		return exportExcel(cellSet, new HierarchicalCellSetFormatter(), filters);
+-	}
++    public static byte[] exportExcel(CellSet cellSet, List<ThinHierarchy> filters) {
++        return exportExcel(cellSet, new HierarchicalCellSetFormatter(), filters);
++    }
++
++    public static byte[] exportExcel(CellSet cellSet,
++                                     ICellSetFormatter formatter,
++                                     List<ThinHierarchy> filters) {
++        CellDataSet table = OlapResultSetUtil.cellSet2Matrix(cellSet, formatter);
++        return exportExcel(table, formatter, filters);
++    }
+ 
+-	public static byte[] exportExcel(CellSet cellSet,
++    public static byte[] exportExcel(CellDataSet table,
+                                      ICellSetFormatter formatter,
+                                      List<ThinHierarchy> filters) {
+-		CellDataSet table = OlapResultSetUtil.cellSet2Matrix(cellSet, formatter);
+-		ExcelBuilderOptions exb = new ExcelBuilderOptions();
+-		exb.repeatValues = (formatter instanceof FlattenedCellSetFormatter);
+-		return getExcel(table, filters, exb);
+-	}
++        ExcelBuilderOptions exb = new ExcelBuilderOptions();
++        exb.repeatValues = (formatter instanceof FlattenedCellSetFormatter);
++        return getExcel(table, filters, exb);
++    }
+ 
+-	private static byte[] getExcel(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
++    private static byte[] getExcel(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
+         // TBD Sheet name is parametric. Useful for future ideas or improvements
+         ExcelWorksheetBuilder worksheetBuilder = new ExcelWorksheetBuilder(table, filters, options);
+         return worksheetBuilder.build();
+-	}
++    }
+ 
+ }
+diff --git a/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/excel/ExcelWorksheetBuilder.java b/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/excel/ExcelWorksheetBuilder.java
+index db3b8f1..a924297 100644
+--- a/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/excel/ExcelWorksheetBuilder.java
++++ b/saiku-core/saiku-service/src/main/java/org/saiku/service/util/export/excel/ExcelWorksheetBuilder.java
+@@ -1,14 +1,5 @@
+ package org.saiku.service.util.export.excel;
+ 
+-import org.saiku.olap.dto.resultset.AbstractBaseCell;
+-import org.saiku.olap.dto.resultset.CellDataSet;
+-import org.saiku.olap.dto.resultset.DataCell;
+-import org.saiku.olap.query2.ThinHierarchy;
+-import org.saiku.olap.query2.ThinLevel;
+-import org.saiku.olap.query2.ThinMember;
+-import org.saiku.olap.util.SaikuProperties;
+-import org.saiku.service.util.exception.SaikuServiceException;
+-
+ import org.apache.commons.lang.StringUtils;
+ import org.apache.poi.hssf.usermodel.HSSFPalette;
+ import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+@@ -18,6 +9,17 @@ import org.apache.poi.ss.util.CellRangeAddress;
+ import org.apache.poi.xssf.usermodel.XSSFCellStyle;
+ import org.apache.poi.xssf.usermodel.XSSFColor;
+ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
++import org.saiku.olap.dto.resultset.AbstractBaseCell;
++import org.saiku.olap.dto.resultset.CellDataSet;
++import org.saiku.olap.dto.resultset.DataCell;
++import org.saiku.olap.dto.resultset.MemberCell;
++import org.saiku.olap.query2.ThinHierarchy;
++import org.saiku.olap.query2.ThinLevel;
++import org.saiku.olap.query2.ThinMember;
++import org.saiku.olap.util.SaikuProperties;
++import org.saiku.service.olap.totals.TotalNode;
++import org.saiku.service.olap.totals.aggregators.TotalAggregator;
++import org.saiku.service.util.exception.SaikuServiceException;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+@@ -28,589 +30,775 @@ import java.text.SimpleDateFormat;
+ import java.util.*;
+ 
+ /**
+- * Created with IntelliJ IDEA.
+- * User: sramazzina
+- * Date: 21/06/12
+- * Time: 7.35
+- * To change this template use File | Settings | File Templates.
++ * Created with IntelliJ IDEA. User: sramazzina Date: 21/06/12 Time: 7.35 To
++ * change this template use File | Settings | File Templates.
+  */
+ 
+ public class ExcelWorksheetBuilder {
+ 
+-  private static final String BASIC_SHEET_FONT_FAMILY = "Arial";
+-  private static final short BASIC_SHEET_FONT_SIZE = 11;
+-  private static final String EMPTY_STRING = "";
+-  private static final String CSS_COLORS_CODE_PROPERTIES = "css-colors-codes.properties";
+-
+-  private int maxRows = -1;
+-  private int maxColumns = -1;
+-
+-
+-  private AbstractBaseCell[][] rowsetHeader;
+-  private AbstractBaseCell[][] rowsetBody;
+-  private Workbook excelWorkbook;
+-  private Sheet workbookSheet;
+-  private String sheetName;
+-  private int topLeftCornerWidth;
+-  private int topLeftCornerHeight;
+-  private CellStyle basicCS;
+-  private CellStyle numberCS;
+-  private CellStyle lighterHeaderCellCS;
+-  private List<ThinHierarchy> queryFilters;
+-  private Map<String, Integer> colorCodesMap;
+-
+-  private int nextAvailableColorCode = 41;
+-  private Properties cssColorCodesProperties;
+-
+-  private HSSFPalette customColorsPalette;
+-  private ExcelBuilderOptions options;
+-
+-  private final Map<String, CellStyle> cellStyles = new HashMap<>();
+-
+-  private static final Logger log = LoggerFactory.getLogger(ExcelWorksheetBuilder.class);
+-
+-  public ExcelWorksheetBuilder(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
+-    init(table, filters, options);
+-  }
+-
+-  private void init(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
+-
+-    this.options = options;
+-    queryFilters = filters;
+-    maxRows = SpreadsheetVersion.EXCEL2007.getMaxRows();
+-    maxColumns = SpreadsheetVersion.EXCEL2007.getMaxColumns();
+-
+-    if ("xls".equals(SaikuProperties.webExportExcelFormat)) {
+-      HSSFWorkbook wb = new HSSFWorkbook();
+-      customColorsPalette = wb.getCustomPalette();
+-      excelWorkbook = wb;
+-      maxRows = SpreadsheetVersion.EXCEL97.getMaxRows();
+-      maxColumns = SpreadsheetVersion.EXCEL97.getMaxColumns();
+-    } else if ("xlsx".equals(SaikuProperties.webExportExcelFormat)) {
+-      excelWorkbook = new XSSFWorkbook();
+-    } else {
+-      excelWorkbook = new XSSFWorkbook();
++    private static final String BASIC_SHEET_FONT_FAMILY = "Arial";
++    private static final short BASIC_SHEET_FONT_SIZE = 11;
++    private static final String EMPTY_STRING = "";
++    private static final String CSS_COLORS_CODE_PROPERTIES = "css-colors-codes.properties";
++
++    private int maxRows = -1;
++    private int maxColumns = -1;
++
++    private AbstractBaseCell[][] rowsetHeader;
++    private AbstractBaseCell[][] rowsetBody;
++
++    private Map<Integer, TotalAggregator[][]> rowScanTotals;
++    private Map<Integer, TotalAggregator[][]> colScanTotals;
++
++    private Workbook excelWorkbook;
++    private Sheet workbookSheet;
++    private String sheetName;
++    private int topLeftCornerWidth;
++    private int topLeftCornerHeight;
++    private CellStyle basicCS;
++    private CellStyle totalsCS;
++    private CellStyle numberCS;
++    private CellStyle lighterHeaderCellCS;
++    private List<ThinHierarchy> queryFilters;
++    private Map<String, Integer> colorCodesMap;
++
++    private int nextAvailableColorCode = 41;
++    private Properties cssColorCodesProperties;
++
++    private HSSFPalette customColorsPalette;
++    private ExcelBuilderOptions options;
++
++    private final Map<String, CellStyle> cellStyles = new HashMap<>();
++
++    private static final Logger log = LoggerFactory.getLogger(ExcelWorksheetBuilder.class);
++
++    public ExcelWorksheetBuilder(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
++        init(table, filters, options);
+     }
+ 
++    private void init(CellDataSet table, List<ThinHierarchy> filters, ExcelBuilderOptions options) {
++
++        this.options = options;
++        queryFilters = filters;
++        maxRows = SpreadsheetVersion.EXCEL2007.getMaxRows();
++        maxColumns = SpreadsheetVersion.EXCEL2007.getMaxColumns();
++
++        if ("xls".equals(SaikuProperties.webExportExcelFormat)) {
++            HSSFWorkbook wb = new HSSFWorkbook();
++            customColorsPalette = wb.getCustomPalette();
++            excelWorkbook = wb;
++            maxRows = SpreadsheetVersion.EXCEL97.getMaxRows();
++            maxColumns = SpreadsheetVersion.EXCEL97.getMaxColumns();
++        } else if ("xlsx".equals(SaikuProperties.webExportExcelFormat)) {
++            excelWorkbook = new XSSFWorkbook();
++        } else {
++            excelWorkbook = new XSSFWorkbook();
++        }
++
++        CreationHelper createHelper = excelWorkbook.getCreationHelper();
++
++        colorCodesMap = new HashMap<>();
++        this.sheetName = options.sheetName;
++        rowsetHeader = table.getCellSetHeaders();
++        rowsetBody = table.getCellSetBody();
++
++        topLeftCornerWidth = findTopLeftCornerWidth();
++        topLeftCornerHeight = findTopLeftCornerHeight();
++
++        initCellStyles();
++
++        // Row totals and subtotals
++        rowScanTotals = new HashMap<>();
++        colScanTotals = new HashMap<>();
++        scanRowAndColumnAggregations(table.getRowTotalsLists(), rowScanTotals, table.getColTotalsLists(), colScanTotals);
++    }
+ 
++    private void initCellStyles() {
++
++        Font font = excelWorkbook.createFont();
++        font.setFontHeightInPoints((short) BASIC_SHEET_FONT_SIZE);
++        font.setFontName(BASIC_SHEET_FONT_FAMILY);
++
++        basicCS = excelWorkbook.createCellStyle();
++        basicCS.setFont(font);
++        basicCS.setAlignment(CellStyle.ALIGN_LEFT);
++        setCellBordersColor(basicCS);
++
++        Font totalsFont = excelWorkbook.createFont();
++        totalsFont.setFontHeightInPoints((short) BASIC_SHEET_FONT_SIZE);
++        totalsFont.setBoldweight(Font.BOLDWEIGHT_BOLD);
++        totalsFont.setFontName(BASIC_SHEET_FONT_FAMILY);
++
++        totalsCS = excelWorkbook.createCellStyle();
++        totalsCS.setFont(totalsFont);
++        totalsCS.setAlignment(CellStyle.ALIGN_RIGHT);
++        setCellBordersColor(totalsCS);
++
++        numberCS = excelWorkbook.createCellStyle();
++        numberCS.setFont(font);
++        numberCS.setAlignment(CellStyle.ALIGN_RIGHT);
++        setCellBordersColor(numberCS);
++        /*
++         * justasg: Let's set default format, used if measure has no format at
++		 * all. More info:
++		 * http://poi.apache.org/apidocs/org/apache/poi/ss/usermodel/
++		 * BuiltinFormats.html#getBuiltinFormat(int) If we don't have default
++		 * format, it will output values up to maximum detail, i.e.
++		 * 121212.3456789 and we like them as 121,212.346
++		 */
++        DataFormat fmt = excelWorkbook.createDataFormat();
++        short dataFormat = fmt.getFormat(SaikuProperties.webExportExcelDefaultNumberFormat);
++        numberCS.setDataFormat(dataFormat);
++
++        Font headerFont = excelWorkbook.createFont();
++        headerFont.setFontHeightInPoints((short) BASIC_SHEET_FONT_SIZE);
++        headerFont.setFontName(BASIC_SHEET_FONT_FAMILY);
++        headerFont.setBoldweight(Font.BOLDWEIGHT_BOLD);
++
++        lighterHeaderCellCS = excelWorkbook.createCellStyle();
++        lighterHeaderCellCS.setFont(headerFont);
++        lighterHeaderCellCS.setAlignment(CellStyle.ALIGN_CENTER);
++        lighterHeaderCellCS.setFillForegroundColor(IndexedColors.GREY_25_PERCENT.getIndex());
++        lighterHeaderCellCS.setFillPattern(CellStyle.SOLID_FOREGROUND);
++        setCellBordersColor(lighterHeaderCellCS);
++
++        CellStyle darkerHeaderCellCS = excelWorkbook.createCellStyle();
++        darkerHeaderCellCS.setFont(headerFont);
++        darkerHeaderCellCS.setAlignment(CellStyle.ALIGN_CENTER);
++        darkerHeaderCellCS.setFillForegroundColor(IndexedColors.GREY_40_PERCENT.getIndex());
++        darkerHeaderCellCS.setFillPattern(CellStyle.SOLID_FOREGROUND);
++        setCellBordersColor(darkerHeaderCellCS);
+ 
+-    CreationHelper createHelper = excelWorkbook.getCreationHelper();
+-
+-    colorCodesMap = new HashMap<>();
+-    this.sheetName = options.sheetName;
+-    rowsetHeader = table.getCellSetHeaders();
+-    rowsetBody = table.getCellSetBody();
+-
+-    topLeftCornerWidth = findTopLeftCornerWidth();
+-    topLeftCornerHeight = findTopLeftCornerHeight();
+-
+-    initCellStyles();
+-  }
+-
+-  private void initCellStyles() {
+-
+-    Font font = excelWorkbook.createFont();
+-    font.setFontHeightInPoints((short) BASIC_SHEET_FONT_SIZE);
+-    font.setFontName(BASIC_SHEET_FONT_FAMILY);
+-
+-    basicCS = excelWorkbook.createCellStyle();
+-    basicCS.setFont(font);
+-    basicCS.setAlignment(CellStyle.ALIGN_LEFT);
+-    setCellBordersColor(basicCS);
+-
+-    numberCS = excelWorkbook.createCellStyle();
+-    numberCS.setFont(font);
+-    numberCS.setAlignment(CellStyle.ALIGN_RIGHT);
+-    setCellBordersColor(numberCS);
+-        /* 
+-        justasg:
+-            Let's set default format, used if measure has no format at all.
+-            More info: http://poi.apache.org/apidocs/org/apache/poi/ss/usermodel/BuiltinFormats.html#getBuiltinFormat(int)
+-            If we don't have default format, it will output values up to maximum detail, i.e. 121212.3456789
+-            and we like them as 121,212.346
+-        */
+-    DataFormat fmt = excelWorkbook.createDataFormat();
+-    short dataFormat = fmt.getFormat(SaikuProperties.webExportExcelDefaultNumberFormat);
+-    numberCS.setDataFormat(dataFormat);
+-
+-
+-    Font headerFont = excelWorkbook.createFont();
+-    headerFont.setFontHeightInPoints((short) BASIC_SHEET_FONT_SIZE);
+-    headerFont.setFontName(BASIC_SHEET_FONT_FAMILY);
+-    headerFont.setBoldweight(Font.BOLDWEIGHT_BOLD);
+-
+-    lighterHeaderCellCS = excelWorkbook.createCellStyle();
+-    lighterHeaderCellCS.setFont(headerFont);
+-    lighterHeaderCellCS.setAlignment(CellStyle.ALIGN_CENTER);
+-    lighterHeaderCellCS.setFillForegroundColor(IndexedColors.GREY_25_PERCENT.getIndex());
+-    lighterHeaderCellCS.setFillPattern(CellStyle.SOLID_FOREGROUND);
+-    setCellBordersColor(lighterHeaderCellCS);
+-
+-    CellStyle darkerHeaderCellCS = excelWorkbook.createCellStyle();
+-    darkerHeaderCellCS.setFont(headerFont);
+-    darkerHeaderCellCS.setAlignment(CellStyle.ALIGN_CENTER);
+-    darkerHeaderCellCS.setFillForegroundColor(IndexedColors.GREY_40_PERCENT.getIndex());
+-    darkerHeaderCellCS.setFillPattern(CellStyle.SOLID_FOREGROUND);
+-    setCellBordersColor(darkerHeaderCellCS);
+-
+-  }
+-
+-  private void setCellBordersColor(CellStyle style) {
+-
+-    style.setBorderBottom(CellStyle.BORDER_THIN);
+-    style.setBottomBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
+-    style.setBorderTop(CellStyle.BORDER_THIN);
+-    style.setTopBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
+-    style.setBorderLeft(CellStyle.BORDER_THIN);
+-    style.setLeftBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
+-    style.setBorderRight(CellStyle.BORDER_THIN);
+-    style.setRightBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
+-  }
+-
+-
+-  public byte[] build() throws SaikuServiceException {
+-
+-    Long start = (new Date()).getTime();
+-    int startRow = initExcelSheet();
+-    Long init = (new Date()).getTime();
+-    int lastHeaderRow = buildExcelTableHeader(startRow);
+-    Long header = (new Date()).getTime();
+-    addExcelTableRows(lastHeaderRow);
+-    Long content = (new Date()).getTime();
+-    finalizeExcelSheet(startRow);
+-    Long finalizing = (new Date()).getTime();
+-
+-    log.debug("Init: " + (init - start) + "ms header: " + (header - init) + "ms content: " + (content - header) + "ms finalizing: " + (finalizing - content) + "ms ");
+-    ByteArrayOutputStream bout = new ByteArrayOutputStream();
+-
+-    try {
+-      excelWorkbook.write(bout);
+-    } catch (IOException e) {
+-      throw new SaikuServiceException("Error creating excel export for query", e);
+     }
+-    return bout.toByteArray();
+-  }
+ 
+-  private void finalizeExcelSheet(int startRow) {
++    private void setCellBordersColor(CellStyle style) {
+ 
++        style.setBorderBottom(CellStyle.BORDER_THIN);
++        style.setBottomBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
++        style.setBorderTop(CellStyle.BORDER_THIN);
++        style.setTopBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
++        style.setBorderLeft(CellStyle.BORDER_THIN);
++        style.setLeftBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
++        style.setBorderRight(CellStyle.BORDER_THIN);
++        style.setRightBorderColor(IndexedColors.GREY_80_PERCENT.getIndex());
++    }
+ 
++    public byte[] build() throws SaikuServiceException {
+ 
+-    boolean autoSize = (rowsetBody != null && rowsetBody.length > 0 && rowsetBody.length < 10000 && rowsetHeader != null && rowsetHeader.length > 0 && rowsetHeader[0].length < 200);
++        Long start = (new Date()).getTime();
++        int startRow = initExcelSheet();
++        Long init = (new Date()).getTime();
++        int lastHeaderRow = buildExcelTableHeader(startRow);
++        Long header = (new Date()).getTime();
++        addExcelTableRows(lastHeaderRow);
++        Long content = (new Date()).getTime();
++        finalizeExcelSheet(startRow);
++        Long finalizing = (new Date()).getTime();
+ 
+-    if (autoSize) {
+-      log.warn("Skipping auto-sizing columns, more than 10000 rows and/or 200 columns");
++        log.debug("Init: " + (init - start) + "ms header: " + (header - init) + "ms content: " + (content - header)
++                + "ms finalizing: " + (finalizing - content) + "ms ");
++        ByteArrayOutputStream bout = new ByteArrayOutputStream();
++
++        try {
++            excelWorkbook.write(bout);
++        } catch (IOException e) {
++            throw new SaikuServiceException("Error creating excel export for query", e);
++        }
++        return bout.toByteArray();
+     }
+ 
+-    Long start = (new Date()).getTime();
+-    if (autoSize) {
+-      // Autosize columns
+-      for (int i=0; i < maxColumns && i < rowsetBody[0].length; i++) {
+-        workbookSheet.autoSizeColumn(i);
+-      }
++    private void finalizeExcelSheet(int startRow) {
++
++        boolean autoSize = (rowsetBody != null && rowsetBody.length > 0 && rowsetBody.length < 10000
++                && rowsetHeader != null && rowsetHeader.length > 0 && rowsetHeader[0].length < 200);
++
++        if (autoSize) {
++            log.warn("Skipping auto-sizing columns, more than 10000 rows and/or 200 columns");
++        }
++
++        Long start = (new Date()).getTime();
++        if (autoSize) {
++            //Detect max column size
++            int maxColumnsSize = rowsetBody[0].length;
++            if (!colScanTotals.isEmpty()) {
++                maxColumnsSize = Collections.max(colScanTotals.keySet()) + 1;
++            }
++            // Autosize columns
++            for (int i = 0; i < maxColumns && i < maxColumnsSize; i++) {
++                workbookSheet.autoSizeColumn(i);
++            }
++        }
++        Long end = (new Date()).getTime();
++        log.debug("Autosizing: " + (end - start) + "ms");
++        // Freeze the header columns
++        int headerWidth = rowsetHeader.length;
++        workbookSheet.createFreezePane(0, startRow + headerWidth, 0, startRow + headerWidth);
+     }
+-    Long end = (new Date()).getTime();
+-    log.debug("Autosizing: " + (end - start) + "ms");
+-    // Freeze the header columns
+-    int headerWidth = rowsetHeader.length;
+-    workbookSheet.createFreezePane( 0, startRow + headerWidth, 0, startRow + headerWidth );
+-  }
+-
+-  private int initExcelSheet() {
+-    // Main Workbook Sheet
+-    if (StringUtils.isNotBlank(options.sheetName)) {
+-      workbookSheet = excelWorkbook.createSheet(this.sheetName);
+-    } else {
+-      workbookSheet = excelWorkbook.createSheet();
++
++    private int initExcelSheet() {
++        // Main Workbook Sheet
++        if (StringUtils.isNotBlank(options.sheetName)) {
++            workbookSheet = excelWorkbook.createSheet(this.sheetName);
++        } else {
++            workbookSheet = excelWorkbook.createSheet();
++        }
++        initSummarySheet();
++        return 0;
+     }
+-    initSummarySheet();
+-    return 0;
+-  }
+-
+-  private void initSummarySheet() {
+-
+-    // Main Workbook Sheet
+-    Sheet summarySheet = excelWorkbook.createSheet("Summary page");
+-
+-    int row = 1;
+-
+-    Row sheetRow = summarySheet.createRow((int) row);
+-    Cell cell = sheetRow.createCell(0);
+-    String todayDate = (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")).format(new Date());
+-    cell.setCellValue("Export date and time: " + todayDate);
+-    summarySheet.addMergedRegion(new CellRangeAddress(1, 1, 0, 2));
+-    row = row+2;
+-
+-    sheetRow = summarySheet.createRow((int) row);
+-    cell = sheetRow.createCell(0);
+-    cell.setCellValue("Dimension");
+-    cell = sheetRow.createCell(1);
+-    cell.setCellValue("Level");
+-    cell = sheetRow.createCell(2);
+-    cell.setCellValue("Filter Applied");
+-    row++;
+-
+-    if (queryFilters != null) {
+-      for (ThinHierarchy item : queryFilters) {
+-        for (ThinLevel s : item.getLevels().values()) {
+-          for (ThinMember i : s.getSelection().getMembers()) {
+-            sheetRow = summarySheet.createRow((short) row);
++
++    private void initSummarySheet() {
++
++        // Main Workbook Sheet
++        Sheet summarySheet = excelWorkbook.createSheet("Summary page");
++
++        int row = 1;
++
++        Row sheetRow = summarySheet.createRow((int) row);
++        Cell cell = sheetRow.createCell(0);
++        String todayDate = (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")).format(new Date());
++        cell.setCellValue("Export date and time: " + todayDate);
++        summarySheet.addMergedRegion(new CellRangeAddress(1, 1, 0, 2));
++        row = row + 2;
++
++        sheetRow = summarySheet.createRow((int) row);
++        cell = sheetRow.createCell(0);
++        cell.setCellValue("Dimension");
++        cell = sheetRow.createCell(1);
++        cell.setCellValue("Level");
++        cell = sheetRow.createCell(2);
++        cell.setCellValue("Filter Applied");
++        row++;
++
++        if (queryFilters != null) {
++            for (ThinHierarchy item : queryFilters) {
++                for (ThinLevel s : item.getLevels().values()) {
++                    for (ThinMember i : s.getSelection().getMembers()) {
++                        sheetRow = summarySheet.createRow((short) row);
++                        cell = sheetRow.createCell(0);
++                        cell.setCellValue(item.getCaption());
++                        cell = sheetRow.createCell(1);
++                        cell.setCellValue(s.getCaption());
++                        cell = sheetRow.createCell(2);
++                        cell.setCellValue(i.getCaption());
++                        row++;
++                    }
++                }
++            }
++        }
++
++        row += 2;
++
++        int rowLength = (rowsetBody != null) ? rowsetBody.length : 0;
++        int columnCount = (rowsetHeader != null && rowsetHeader.length > 0) ? rowsetHeader[0].length : 0;
++        int headerLength = (rowsetHeader != null) ? rowsetHeader.length : 0;
++
++        if (columnCount > maxColumns) {
++            sheetRow = summarySheet.createRow((int) row);
++            cell = sheetRow.createCell(0);
++            cell.setCellValue("Excel sheet is truncated, only contains " + maxColumns + " columns of " + (columnCount));
++            summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
++            row++;
++        }
++
++        if ((headerLength + rowLength) > maxRows) {
++            sheetRow = summarySheet.createRow((int) row);
+             cell = sheetRow.createCell(0);
+-            cell.setCellValue(item.getCaption());
+-            cell = sheetRow.createCell(1);
+-            cell.setCellValue(s.getCaption());
+-            cell = sheetRow.createCell(2);
+-            cell.setCellValue(i.getCaption());
++            cell.setCellValue(
++                    "Excel sheet is truncated, only contains " + maxRows + " rows of " + (headerLength + rowLength));
++            summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
+             row++;
+-          }
+         }
+-      }
++
++        row++;
++
++        sheetRow = summarySheet.createRow((int) row);
++        cell = sheetRow.createCell(0);
++        cell.setCellValue(SaikuProperties.webExportExcelPoweredBy);
++        summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
++
++        // Autosize columns for summary sheet
++        for (int i = 0; i < 5; i++) {
++            summarySheet.autoSizeColumn(i);
++        }
+     }
+ 
+-    row += 2;
++    private void addExcelTableRows(int startingRow) {
++
++        Row sheetRow = null;
++        Cell cell = null;
++
++        if ((startingRow + rowsetBody.length) > maxRows) {
++            log.warn("Excel sheet is truncated, only outputting " + maxRows + " rows of "
++                    + (rowsetBody.length + startingRow));
++        }
++        if (rowsetBody.length > 0 && rowsetBody[0].length > maxColumns) {
++            log.warn("Excel sheet is truncated, only outputting " + maxColumns + " columns of "
++                    + (rowsetBody[0].length));
++        }
+ 
+-    int rowLength = (rowsetBody != null) ? rowsetBody.length : 0;
+-    int columnCount = (rowsetHeader != null && rowsetHeader.length > 0) ? rowsetHeader[0].length : 0;
+-    int headerLength = (rowsetHeader != null) ? rowsetHeader.length : 0;
++        int rowCount = startingRow;
++
++        for (int x = 0; (x + startingRow) < maxRows && x < rowsetBody.length; x++) {
++
++            sheetRow = workbookSheet.createRow(x + startingRow);
++
++            int column = 0;
++            for (int y = 0; y < maxColumns && y < rowsetBody[x].length; y++) {
++                cell = sheetRow.createCell(column);
++                String value = rowsetBody[x][y].getFormattedValue();
++                if (value == null && options.repeatValues) {
++                    // If the row cells has a null values it means the value is
++                    // repeated in the data internally
++                    // but not in the interface. To properly format the Excel
++                    // export file we need that value so we
++                    // get it from the same position in the prev row
++                    value = workbookSheet.getRow(sheetRow.getRowNum() - 1).getCell(column).getStringCellValue();
++                }
++                if (rowsetBody[x][y] instanceof DataCell && ((DataCell) rowsetBody[x][y]).getRawNumber() != null) {
++                    Number numberValue = ((DataCell) rowsetBody[x][y]).getRawNumber();
++                    cell.setCellValue(numberValue.doubleValue());
++                    applyCellFormatting(cell, x, y);
++                } else {
++                    cell.setCellStyle(basicCS);
++                    cell.setCellValue(value);
++                }
++
++                //Set column sub totals
++                column = setColTotalAggregationCell(colScanTotals, sheetRow, x, column, true, false);
++
++                //Set column grand totals
++                if (y == rowsetBody[x].length - 1) {
++                    setColTotalAggregationCell(colScanTotals, sheetRow, x, column - 1, true, x == 0);
++                }
++            }
++
++            // Set row sub totals
++            startingRow = setRowTotalAggregationCell(rowScanTotals, startingRow, x, false);
++            rowCount = startingRow + x;
++        }
+ 
+-    if (columnCount > maxColumns) {
+-      sheetRow = summarySheet.createRow((int) row);
+-      cell = sheetRow.createCell(0);
+-      cell.setCellValue("Excel sheet is truncated, only contains " + maxColumns + " columns of " + (columnCount));
+-      summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
+-      row++;
++        //Set row grand totals
++        setRowTotalAggregationCell(rowScanTotals, rowCount, 0, true);
+     }
+ 
+-    if ((headerLength + rowLength) > maxRows) {
+-      sheetRow = summarySheet.createRow((int) row);
+-      cell = sheetRow.createCell(0);
+-      cell.setCellValue("Excel sheet is truncated, only contains " + maxRows + " rows of " + ( headerLength + rowLength));
+-      summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
+-      row++;
++    private void scanRowAndColumnAggregations(List<TotalNode>[] rowTotalsLists, Map<Integer, TotalAggregator[][]> rowScanTotals, List<TotalNode>[] colTotalsLists, Map<Integer, TotalAggregator[][]> colScanTotals) {
++        if (rowTotalsLists != null) {
++            for (List<TotalNode> totalNodes : rowTotalsLists) {
++                //Scan row totals
++                scanAggregations(true, totalNodes, rowScanTotals);
++            }
++        }
++        if (colTotalsLists != null) {
++            for (List<TotalNode> totalNodes : colTotalsLists) {
++                //Scan Columns grand totals
++                scanAggregations(false, totalNodes, colScanTotals);
++            }
++        }
+     }
+ 
+-    row++;
++    private void scanAggregations(boolean row, List<TotalNode> totalNodes, Map<Integer, TotalAggregator[][]> scanSums) {
++        if (totalNodes != null && (!totalNodes.isEmpty())) {
++            int index;
++            if (row) {
++                index = rowsetHeader.length - 2;
++            } else {
++                index = detectColumnStartIndex();
++            }
++            for (TotalNode n : totalNodes) {
++                TotalAggregator[][] tg = n.getTotalGroups();
++                if (tg.length > 0) {
++                    if (n.getSpan() > n.getWidth()) {
++                        index += n.getSpan();
++                    } else {
++                        index += n.getWidth();
++                    }
++                    index++;
++                    scanSums.put(index, tg);
++                }
++            }
++        }
++    }
+ 
++    private int setRowTotalAggregationCell(Map<Integer, TotalAggregator[][]> scanTotals, int startIndex, int subIndex, boolean grandTotal) {
++        if (!scanTotals.isEmpty()) {
++            int row = subIndex + startIndex;
++            TotalAggregator[][] aggregatorsTable = scanTotals.get(row);
++            if (aggregatorsTable != null) {
++                //Create totals row
++                Row sheetRow = workbookSheet.createRow(row + 1);
+ 
+-    sheetRow = summarySheet.createRow((int) row);
+-    cell = sheetRow.createCell(0);
+-    cell.setCellValue(SaikuProperties.webExportExcelPoweredBy);
+-    summarySheet.addMergedRegion(new CellRangeAddress(row, row, 0, 10));
++                //Detect column start index
++                int startColumnIndex = detectColumnStartIndex();
+ 
+-    // Autosize columns for summary sheet
+-    for (int i=0; i<5; i++) {
+-      summarySheet.autoSizeColumn(i);
+-    }
+-  }
++                if (grandTotal) {
++                    setGrandTotalLabel(sheetRow, startColumnIndex, false);
++                }
++
++                for (TotalAggregator[] aggregators : aggregatorsTable) {
++
++                    int column = startColumnIndex;
+ 
+-  private void addExcelTableRows(int startingRow) {
++                    for (TotalAggregator aggregator : aggregators) {
+ 
+-    Row sheetRow = null;
+-    Cell cell = null;
+-    String formatString = null;
++                        //Calculate column sub total index
++                        column = setColTotalAggregationCell(colScanTotals, null, -1, column, false, false);
+ 
+-    if ((startingRow + rowsetBody.length) > maxRows) {
+-      log.warn("Excel sheet is truncated, only outputting " + maxRows + " rows of " + (rowsetBody.length + startingRow));
++                        //Create row totals cell
++                        Cell cell = sheetRow.createCell(column);
++                        String value = aggregator.getFormattedValue();
++                        cell.setCellValue(value);
++                        cell.setCellStyle(totalsCS);
++                    }
++                }
++                startIndex++;
++            }
++        }
++        return startIndex;
+     }
+-    if (rowsetBody.length > 0 && rowsetBody[0].length > maxColumns) {
+-      log.warn("Excel sheet is truncated, only outputting " + maxColumns + " columns of " + (rowsetBody[0].length));
++
++    /**
++     * @return columns data start index
++     */
++    private int detectColumnStartIndex() {
++        int index = 0;
++        if (rowsetBody.length > 0) {
++            for (AbstractBaseCell cell : rowsetBody[0]) {
++                if (cell instanceof MemberCell) {
++                    index++;
++                }
++            }
++            index--;
++        }
++        return index;
+     }
+ 
+-    for (int x = 0; (x + startingRow)  < maxRows && x < rowsetBody.length; x++) {
+-
+-      sheetRow = workbookSheet.createRow((int) x + startingRow);
+-      for (int y = 0; y < maxColumns && y < rowsetBody[x].length; y++) {
+-        cell = sheetRow.createCell(y);
+-        String value = rowsetBody[x][y].getFormattedValue();
+-        if (value == null && options.repeatValues) {
+-          // If the row cells has a null values it means the value is repeated in the data internally
+-          // but not in the interface. To properly format the Excel export file we need that value so we
+-          // get it from the same position in the prev row
+-          value = workbookSheet.getRow(sheetRow.getRowNum()-1).getCell(y).getStringCellValue();
++    private int setColTotalAggregationCell(Map<Integer, TotalAggregator[][]> scanTotals, Row sheetRow, int x, int column, boolean setValue, boolean grandTotal) {
++        column++;
++        if (!scanTotals.isEmpty()) {
++            TotalAggregator[][] aggregatorsTable = scanTotals.get(column);
++            if (aggregatorsTable != null) {
++                if (setValue) {
++                    if (grandTotal) {
++                        setGrandTotalLabel(sheetRow.getRowNum() - 1, column, true);
++                    }
++                    for (TotalAggregator[] aggregators : aggregatorsTable) {
++                        Cell cell = sheetRow.createCell(column);
++                        String value = aggregators[x].getFormattedValue();
++                        cell.setCellValue(value);
++                        cell.setCellStyle(totalsCS);
++                    }
++                }
++                column++;
++            }
+         }
+-        if (rowsetBody[x][y] instanceof DataCell && ((DataCell) rowsetBody[x][y]).getRawNumber() != null) {
+-          Number numberValue = ((DataCell) rowsetBody[x][y]).getRawNumber();
+-          cell.setCellValue(numberValue.doubleValue());
+-          applyCellFormatting(cell, x, y);
+-        } else {
+-          cell.setCellStyle(basicCS);
+-          cell.setCellValue(value);
++        return column;
++    }
++
++    private void setGrandTotalLabel(int x, int y, boolean header) {
++        Row sheetRow = workbookSheet.getRow(x);
++        if (sheetRow != null) {
++            setGrandTotalLabel(sheetRow, y, header);
+         }
+-      }
+     }
+-  }
+-
+-  private void applyCellFormatting(Cell cell, int x, int y) {
+-    String formatString;
+-    formatString = ((DataCell) rowsetBody[x][y]).getFormatString();
+-    if ((formatString != null) && (formatString.trim().length() > 0)) {
+-
+-      String formatKey = "" + formatString;
+-      if (!cellStyles.containsKey(formatKey)) {
+-        // Inherit formatting from cube schema FORMAT_STRING
+-        CellStyle numberCSClone = excelWorkbook.createCellStyle();
+-        numberCSClone.cloneStyleFrom(numberCS);
+-        DataFormat fmt = excelWorkbook.createDataFormat();
+ 
+-        // the format string can contain macro values such as "Standard" from mondrian.util.Format
+-        // try and look it up, otherwise use the given one
+-        formatString = FormatUtil.getFormatString(formatString);
+-        try {
+-          short dataFormat = fmt.getFormat(formatString);
+-          numberCSClone.setDataFormat(dataFormat);
+-        } catch (Exception e) {
+-          // we tried to apply the mondrian format, but probably failed, so lets use the standard one
+-          //short dataFormat = fmt.getFormat(SaikuProperties.webExportExcelDefaultNumberFormat);
+-          //numberCSClone.setDataFormat(dataFormat);
++    private void setGrandTotalLabel(Row sheetRow, int y, boolean header) {
++        Cell cell = sheetRow.createCell(y);
++        //TODO i18n
++        String value = "Grand Total";
++        if (header) {
++            fillHeaderCell(sheetRow, value, y);
++        } else {
++            cell.setCellValue(value);
++            cell.setCellStyle(basicCS);
+         }
+-        cellStyles.put(formatKey, numberCSClone);
+-      }
+-
+-      CellStyle numberCSClone = cellStyles.get(formatKey);
+-
+-      // Check for cell background
+-      Map<String, String> properties = ((DataCell) rowsetBody[x][y]).getProperties();
+-      if (properties.containsKey("style")) {
+-        String colorCode = properties.get("style");
+-        short colorCodeIndex = getColorFromCustomPalette(colorCode);
+-        if (colorCodeIndex != -1) {
+-          numberCSClone.setFillForegroundColor(colorCodeIndex);
+-          numberCSClone.setFillPattern(CellStyle.SOLID_FOREGROUND);
+-        } else if (customColorsPalette == null) {
+-          try {
+-
+-            if (cssColorCodesProperties != null && cssColorCodesProperties.containsKey(colorCode)) {
+-              colorCode = cssColorCodesProperties.getProperty(colorCode);
++    }
++
++    private void applyCellFormatting(Cell cell, int x, int y) {
++        String formatString;
++        formatString = ((DataCell) rowsetBody[x][y]).getFormatString();
++        if ((formatString != null) && (formatString.trim().length() > 0)) {
++
++            String formatKey = "" + formatString;
++            if (!cellStyles.containsKey(formatKey)) {
++                // Inherit formatting from cube schema FORMAT_STRING
++                CellStyle numberCSClone = excelWorkbook.createCellStyle();
++                numberCSClone.cloneStyleFrom(numberCS);
++                DataFormat fmt = excelWorkbook.createDataFormat();
++
++                // the format string can contain macro values such as "Standard"
++                // from mondrian.util.Format
++                // try and look it up, otherwise use the given one
++                formatString = FormatUtil.getFormatString(formatString);
++                try {
++                    short dataFormat = fmt.getFormat(formatString);
++                    numberCSClone.setDataFormat(dataFormat);
++                } catch (Exception e) {
++                    // we tried to apply the mondrian format, but probably
++                    // failed, so lets use the standard one
++                    // short dataFormat =
++                    // fmt.getFormat(SaikuProperties.webExportExcelDefaultNumberFormat);
++                    // numberCSClone.setDataFormat(dataFormat);
++                }
++                cellStyles.put(formatKey, numberCSClone);
++            }
++
++            CellStyle numberCSClone = cellStyles.get(formatKey);
++
++            // Check for cell background
++            Map<String, String> properties = ((DataCell) rowsetBody[x][y]).getProperties();
++            if (properties.containsKey("style")) {
++                String colorCode = properties.get("style");
++                short colorCodeIndex = getColorFromCustomPalette(colorCode);
++                if (colorCodeIndex != -1) {
++                    numberCSClone.setFillForegroundColor(colorCodeIndex);
++                    numberCSClone.setFillPattern(CellStyle.SOLID_FOREGROUND);
++                } else if (customColorsPalette == null) {
++                    try {
++
++                        if (cssColorCodesProperties != null && cssColorCodesProperties.containsKey(colorCode)) {
++                            colorCode = cssColorCodesProperties.getProperty(colorCode);
++                        }
++
++                        int redCode = Integer.parseInt(colorCode.substring(1, 3), 16);
++                        int greenCode = Integer.parseInt(colorCode.substring(3, 5), 16);
++                        int blueCode = Integer.parseInt(colorCode.substring(5, 7), 16);
++                        numberCSClone.setFillPattern(CellStyle.SOLID_FOREGROUND);
++                        ((XSSFCellStyle) numberCSClone).setFillForegroundColor(
++                                new XSSFColor(new java.awt.Color(redCode, greenCode, blueCode)));
++                        ((XSSFCellStyle) numberCSClone).setFillBackgroundColor(
++                                new XSSFColor(new java.awt.Color(redCode, greenCode, blueCode)));
++                    } catch (Exception e) {
++                        // we tried to set the color, no luck, lets continue
++                        // without
++                    }
++
++                }
++            } else {
++
++                numberCSClone.setFillForegroundColor(numberCS.getFillForegroundColor());
++                numberCSClone.setFillBackgroundColor(numberCS.getFillBackgroundColor());
+             }
++            cell.setCellStyle(numberCSClone);
++        } else {
++            cell.setCellStyle(numberCS);
++        }
+ 
++    }
+ 
+-            int redCode = Integer.parseInt(colorCode.substring(1, 3), 16);
+-            int greenCode = Integer.parseInt(colorCode.substring(3, 5), 16);
+-            int blueCode = Integer.parseInt(colorCode.substring(5, 7), 16);
+-            numberCSClone.setFillPattern(CellStyle.SOLID_FOREGROUND);
+-            ((XSSFCellStyle) numberCSClone).setFillForegroundColor(new XSSFColor(new java.awt.Color(redCode, greenCode, blueCode)));
+-            ((XSSFCellStyle) numberCSClone).setFillBackgroundColor(new XSSFColor(new java.awt.Color(redCode, greenCode, blueCode)));
+-          } catch (Exception e) {
+-            // we tried to set the color, no luck, lets continue without
+-          }
++    private short getColorFromCustomPalette(String style) {
++
++        short returnedColorIndex = -1;
++        InputStream is = null;
++
++        if (colorCodesMap.containsKey(style)) {
++            returnedColorIndex = colorCodesMap.get(style).shortValue();
++        } else {
++            try {
++
++                if (cssColorCodesProperties == null) {
++                    is = getClass().getResourceAsStream(CSS_COLORS_CODE_PROPERTIES);
++                    if (is != null) {
++                        cssColorCodesProperties = new Properties();
++                        cssColorCodesProperties.load(is);
++                    }
++                }
++
++                String colorCode = cssColorCodesProperties.getProperty(style);
++                if (colorCode != null) {
++                    try {
++                        int redCode = Integer.parseInt(colorCode.substring(1, 3), 16);
++                        int greenCode = Integer.parseInt(colorCode.substring(3, 5), 16);
++                        int blueCode = Integer.parseInt(colorCode.substring(5, 7), 16);
++                        if (customColorsPalette != null) {
++                            customColorsPalette.setColorAtIndex((byte) nextAvailableColorCode, (byte) redCode,
++                                    (byte) greenCode, (byte) blueCode);
++                            returnedColorIndex = customColorsPalette.getColor(nextAvailableColorCode).getIndex();
++                            colorCodesMap.put(style, (int) returnedColorIndex);
++                        } else {
++                            return -1;
++                        }
++                        nextAvailableColorCode++;
++                    } catch (Exception e) {
++                        // we tried to set the color, no luck, lets continue
++                        // without
++                        return -1;
++                    }
++                }
++            } catch (IOException e) {
++                log.error("IO Exception", e);
++            } finally {
++                try {
++                    if (is != null)
++                        is.close();
++                } catch (IOException e) {
++                    log.error("IO Exception", e);
++                }
++            }
+ 
+         }
+-      } else {
+-
+-        numberCSClone.setFillForegroundColor(numberCS.getFillForegroundColor());
+-        numberCSClone.setFillBackgroundColor(numberCS.getFillBackgroundColor());
+-      }
+-      cell.setCellStyle(numberCSClone);
+-    } else {
+-      cell.setCellStyle(numberCS);
++
++        return returnedColorIndex; // To change body of created methods use File
++        // | Settings | File Templates.
+     }
+ 
+-  }
++    private int buildExcelTableHeader(int startRow) {
+ 
+-  private short getColorFromCustomPalette(String style) {
++        Row sheetRow = null;
++        int x = 0;
++        int y = 0;
++        int startSameFromPos = 0;
++        int mergedCellsWidth = 0;
++        boolean isLastHeaderRow = false;
++        boolean isLastColumn = false;
++        String nextHeader = EMPTY_STRING;
++        String currentHeader = EMPTY_STRING;
++        ArrayList<ExcelMergedRegionItemConfig> mergedItemsConfig = new ArrayList<>();
+ 
+-    short returnedColorIndex = -1;
+-    InputStream is = null;
++        for (x = 0; x < rowsetHeader.length; x++) {
+ 
+-    if (colorCodesMap.containsKey(style)) {
+-      returnedColorIndex = colorCodesMap.get(style).shortValue();
+-    } else {
+-      try {
++            sheetRow = workbookSheet.createRow((int) x + startRow);
+ 
+-        if (cssColorCodesProperties == null) {
+-          is = getClass().getResourceAsStream(CSS_COLORS_CODE_PROPERTIES);
+-          if (is != null) {
+-            cssColorCodesProperties = new Properties();
+-            cssColorCodesProperties.load(is);
+-          }
+-        }
++            nextHeader = EMPTY_STRING;
++            isLastColumn = false;
++            startSameFromPos = 0;
++            mergedCellsWidth = 0;
+ 
+-        String colorCode = cssColorCodesProperties.getProperty(style);
+-        if (colorCode != null) {
+-          try {
+-            int redCode = Integer.parseInt(colorCode.substring(1, 3), 16);
+-            int greenCode = Integer.parseInt(colorCode.substring(3, 5), 16);
+-            int blueCode = Integer.parseInt(colorCode.substring(5, 7), 16);
+-            if (customColorsPalette != null) {
+-              customColorsPalette.setColorAtIndex((byte) nextAvailableColorCode, (byte) redCode,
+-                  (byte) greenCode,
+-                  (byte) blueCode);
+-              returnedColorIndex = customColorsPalette.getColor(nextAvailableColorCode).getIndex();
+-              colorCodesMap.put(style, (int) returnedColorIndex);
+-            } else {
+-              return -1;
++            if (x + 1 == rowsetHeader.length) {
++                isLastHeaderRow = true;
+             }
+-            nextAvailableColorCode++;
+-          } catch (Exception e) {
+-            // we tried to set the color, no luck, lets continue without
+-            return -1;
+-          }
+-        }
+-      } catch (IOException e) {
+-          log.error("IO Exception", e);
+-      } finally {
+-        try {
+-          if (is != null)
+-            is.close();
+-        } catch (IOException e) {
+-          log.error("IO Exception", e);
++
++            int column = 0;
++            for (y = 0; y < maxColumns && y < rowsetHeader[x].length; y++) {
++
++                currentHeader = rowsetHeader[x][y].getFormattedValue();
++                if (currentHeader != null) {
++                    if (rowsetHeader[x].length == y + 1) {
++                        isLastColumn = true;
++                    } else {
++                        nextHeader = rowsetHeader[x][y + 1].getFormattedValue();
++                    }
++
++                    manageColumnHeaderDisplay(sheetRow, x, column, currentHeader);
++
++                    if (!isLastHeaderRow) {
++                        if (nextHeader != null && !nextHeader.equals(currentHeader) || isLastColumn) {
++                            manageCellsMerge(column, x + startRow, mergedCellsWidth + 1, startSameFromPos,
++                                    mergedItemsConfig);
++                            startSameFromPos = column + 1;
++                            mergedCellsWidth = 0;
++                        } else if (nextHeader != null && nextHeader.equals(currentHeader)) {
++                            mergedCellsWidth++;
++                        }
++                    }
++                } else {
++                    startSameFromPos++;
++                }
++
++                //Set sub total column space
++                int nextColumn = setColTotalAggregationCell(colScanTotals, sheetRow, x, column, false, false);
++                if (column != nextColumn - 1) {
++                    startSameFromPos++;
++                }
++                column = nextColumn;
++            }
++            // Manage the merge condition on exit from columns scan
++            if (!isLastHeaderRow)
++                manageCellsMerge(y - 1, x, mergedCellsWidth + 1, startSameFromPos, mergedItemsConfig);
+         }
+-      }
+ 
+-    }
++        if (topLeftCornerHeight > 0 && topLeftCornerWidth > 0) {
++            workbookSheet.addMergedRegion(
++                    new CellRangeAddress(startRow, startRow + topLeftCornerHeight - 1, 0, topLeftCornerWidth - 1));
++        }
+ 
+-    return returnedColorIndex;  //To change body of created methods use File | Settings | File Templates.
+-  }
+-
+-  private int buildExcelTableHeader(int startRow) {
+-
+-    Row sheetRow = null;
+-    int x = 0;
+-    int y = 0;
+-    int startSameFromPos = 0;
+-    int mergedCellsWidth = 0;
+-    boolean isLastHeaderRow = false;
+-    boolean isLastColumn = false;
+-    String nextHeader = EMPTY_STRING;
+-    String currentHeader = EMPTY_STRING;
+-    ArrayList<ExcelMergedRegionItemConfig> mergedItemsConfig = new ArrayList<>();
+-
+-    for (x = 0; x < rowsetHeader.length; x++) {
+-
+-      sheetRow = workbookSheet.createRow((int) x + startRow);
+-
+-      nextHeader = EMPTY_STRING;
+-      isLastColumn = false;
+-      startSameFromPos = 0;
+-      mergedCellsWidth = 0;
+-
+-      if (x + 1 == rowsetHeader.length) isLastHeaderRow = true;
+-
+-      for (y = 0; y < maxColumns && y < rowsetHeader[x].length; y++) {
+-        currentHeader = rowsetHeader[x][y].getFormattedValue();
+-        if (currentHeader != null) {
+-          if (rowsetHeader[x].length == y+1)
+-            isLastColumn = true;
+-          else
+-            nextHeader = rowsetHeader[x][y+1].getFormattedValue();
+-
+-          manageColumnHeaderDisplay(sheetRow, x, y, currentHeader);
+-
+-          if (!isLastHeaderRow) {
+-            if (nextHeader!=null && !nextHeader.equals(currentHeader) || isLastColumn) {
+-              manageCellsMerge(y,
+-                x + startRow,
+-                mergedCellsWidth + 1,
+-                startSameFromPos,
+-                mergedItemsConfig);
+-              startSameFromPos = y+1;
+-              mergedCellsWidth = 0;
+-            } else if (nextHeader != null && nextHeader.equals(currentHeader)) {
+-              mergedCellsWidth++;
++        if (mergedItemsConfig.size() > 0) {
++            for (ExcelMergedRegionItemConfig item : mergedItemsConfig) {
++                int lastCol = item.getStartX() + item.getWidth() - 1;
++                lastCol = lastCol >= maxColumns ? maxColumns - 1 : lastCol;
++                workbookSheet.addMergedRegion(new CellRangeAddress(item.getStartY(),
++                        item.getStartY() + item.getHeight(), item.getStartX(), lastCol));
+             }
+-          }
+-        } else
+-          startSameFromPos++;
+-      }
+-      // Manage the merge condition on exit from columns scan
+-      if (!isLastHeaderRow)
+-        manageCellsMerge(y - 1, x, mergedCellsWidth+1, startSameFromPos, mergedItemsConfig);
+-    }
++        }
+ 
+-    if (topLeftCornerHeight > 0 && topLeftCornerWidth > 0) {
+-      workbookSheet.addMergedRegion(new CellRangeAddress(startRow, startRow + topLeftCornerHeight - 1, 0, topLeftCornerWidth - 1));
++        return x + startRow;
+     }
+ 
+-    if (mergedItemsConfig.size()>0) {
+-      for (ExcelMergedRegionItemConfig item : mergedItemsConfig) {
+-        int lastCol = item.getStartX() + item.getWidth() - 1;
+-        lastCol = lastCol >= maxColumns ? maxColumns - 1 : lastCol;
+-        workbookSheet.addMergedRegion(new CellRangeAddress(item.getStartY(), item.getStartY() + item.getHeight(),
+-          item.getStartX(), lastCol));
+-      }
++    private void manageColumnHeaderDisplay(Row sheetRow, int x, int y, String currentHeader) {
++        if (topLeftCornerHeight > 0 && x >= topLeftCornerHeight) {
++            fillHeaderCell(sheetRow, currentHeader, y);
++        } else if ((topLeftCornerHeight > 0 && x < topLeftCornerHeight)
++                && (topLeftCornerWidth > 0 && y >= topLeftCornerWidth)) {
++            fillHeaderCell(sheetRow, currentHeader, y);
++        } else if (topLeftCornerHeight == 0 && topLeftCornerWidth == 0)
++            fillHeaderCell(sheetRow, currentHeader, y);
+     }
+ 
+-    return x + startRow;
+-  }
++    private void manageCellsMerge(int rowPos, int colPos, int width, int startSameFromPos,
++                                  ArrayList<ExcelMergedRegionItemConfig> mergedItemsConfig) {
+ 
+-  private void manageColumnHeaderDisplay(Row sheetRow, int x, int y, String currentHeader) {
+-    if (topLeftCornerHeight > 0 && x >= topLeftCornerHeight) {
+-      fillHeaderCell(sheetRow, currentHeader, y);
+-    } else if ((topLeftCornerHeight > 0 && x < topLeftCornerHeight) &&
+-      (topLeftCornerWidth > 0 && y >= topLeftCornerWidth)) {
+-      fillHeaderCell(sheetRow, currentHeader, y);
+-    } else if (topLeftCornerHeight == 0 && topLeftCornerWidth == 0)
+-      fillHeaderCell(sheetRow, currentHeader, y);
+-  }
++        ExcelMergedRegionItemConfig foundItem = null;
++        boolean itemGetFromList = false;
+ 
+-  private void manageCellsMerge(int rowPos, int colPos,
+-                                int width,
+-                                int startSameFromPos,
+-                                ArrayList<ExcelMergedRegionItemConfig> mergedItemsConfig) {
++        if (width == 1)
++            return;
+ 
++        for (ExcelMergedRegionItemConfig item : mergedItemsConfig) {
++            if (item.getStartY() == colPos && item.getStartX() == rowPos) {
++                foundItem = item;
++                itemGetFromList = true;
++            }
++        }
+ 
+-    ExcelMergedRegionItemConfig foundItem = null;
+-    boolean itemGetFromList = false;
+-
+-    if (width == 1) return;
++        if (foundItem == null)
++            foundItem = new ExcelMergedRegionItemConfig();
+ 
+-    for (ExcelMergedRegionItemConfig item : mergedItemsConfig) {
+-      if (item.getStartY() == colPos && item.getStartX() == rowPos) {
+-        foundItem = item;
+-        itemGetFromList = true;
+-      }
++        foundItem.setHeight(0);
++        foundItem.setWidth(width);
++        foundItem.setStartX(startSameFromPos);
++        foundItem.setStartY(colPos);
++        if (mergedItemsConfig.isEmpty() || !itemGetFromList)
++            mergedItemsConfig.add(foundItem);
+     }
+ 
+-    if (foundItem == null)
+-      foundItem = new ExcelMergedRegionItemConfig();
+-
+-    foundItem.setHeight(0);
+-    foundItem.setWidth(width);
+-    foundItem.setStartX(startSameFromPos);
+-    foundItem.setStartY(colPos);
+-    if (mergedItemsConfig.isEmpty() || !itemGetFromList)
+-      mergedItemsConfig.add(foundItem);
+-  }
+-
+-  private void fillHeaderCell(Row sheetRow, String formattedValue, int y) {
+-    Cell cell = sheetRow.createCell(y);
+-    cell.setCellValue(formattedValue);
+-    cell.setCellStyle(lighterHeaderCellCS);
+-  }
+-
+-
+-  /**
+-   * Find the width in cells of the top left corner of the table
+-   *
+-   * @return
+-   */
+-  private int findTopLeftCornerWidth() {
+-
+-    int width = 0;
+-    int x = 0;
+-    boolean exit = (rowsetHeader.length < 1 || rowsetHeader[0][0].getRawValue() != null);
+-    String cellValue = null;
+-
+-    for (x = 0; (!exit && rowsetHeader[0].length > x); x++) {
+-
+-      cellValue = rowsetHeader[0][x].getRawValue();
+-      if (cellValue == null) {
+-        width = x + 1;
+-      } else {
+-        exit = true;
+-      }
++    private void fillHeaderCell(Row sheetRow, String formattedValue, int y) {
++        Cell cell = sheetRow.createCell(y);
++        cell.setCellValue(formattedValue);
++        cell.setCellStyle(lighterHeaderCellCS);
+     }
+ 
+-    return width;
+-  }
++    /**
++     * Find the width in cells of the top left corner of the table
++     *
++     * @return
++     */
++    private int findTopLeftCornerWidth() {
++
++        int width = 0;
++        int x = 0;
++        boolean exit = (rowsetHeader.length < 1 || rowsetHeader[0][0].getRawValue() != null);
++        String cellValue = null;
+ 
+-  /**
+-   * Find the height in cells of the top left corner of the table
+-   *
+-   * @return
+-   */
+-  private int findTopLeftCornerHeight() {
++        for (x = 0; (!exit && rowsetHeader[0].length > x); x++) {
+ 
+-    return rowsetHeader.length > 0 ? rowsetHeader.length - 1 : 0;
+-  }
++            cellValue = rowsetHeader[0][x].getRawValue();
++            if (cellValue == null) {
++                width = x + 1;
++            } else {
++                exit = true;
++            }
++        }
++
++        return width;
++    }
++
++    /**
++     * Find the height in cells of the top left corner of the table
++     *
++     * @return
++     */
++    private int findTopLeftCornerHeight() {
++
++        return rowsetHeader.length > 0 ? rowsetHeader.length - 1 : 0;
++    }
+ 
+ }
+-- 
+2.6.1.windows.1
+
