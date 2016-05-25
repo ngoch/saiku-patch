@@ -1,0 +1,40 @@
+From 4f6570192beb270087cfd27f06f8e3be33585837 Mon Sep 17 00:00:00 2001
+From: Baaka Tsutskhvashvili <baaka@fina2.net>
+Date: Wed, 25 May 2016 12:33:04 +0400
+Subject: [PATCH] SKU-1474 #comment Pre-filter on server not working
+
+---
+ saiku-ui/js/saiku/views/SelectionsModal.js | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/saiku-ui/js/saiku/views/SelectionsModal.js b/saiku-ui/js/saiku/views/SelectionsModal.js
+index 131a146..d76ae9b 100755
+--- a/saiku-ui/js/saiku/views/SelectionsModal.js
++++ b/saiku-ui/js/saiku/views/SelectionsModal.js
+@@ -257,10 +257,10 @@ var SelectionsModal = Modal.extend({
+                 hName = dName;
+             }
+         }
+-        var level = new Level({}, { 
+-            ui: this, 
+-            cube: this.workspace.selected_cube, 
+-            dimension: dName, 
++        var level = new Level({}, {
++            ui: this,
++            cube: this.workspace.selected_cube,
++            dimension: dName,
+             hierarchy: hName
+         });
+ 
+@@ -405,7 +405,7 @@ var SelectionsModal = Modal.extend({
+ 
+             // Filter out used members
+             this.available_members = _.select(this.available_members, function(o) {
+-                return used_members.indexOf(o.obj.caption) === -1;
++                return used_members.indexOf(o.caption) === -1;
+             });
+ 
+             if (this.available_members.length > 0) {
+-- 
+2.5.3.windows.1
+
